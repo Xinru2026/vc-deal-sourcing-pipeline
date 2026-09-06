@@ -1,7 +1,16 @@
-﻿*.docx
+*.docx
 *.xlsx
 *.png
 *.pdf
 interview_*
 PXN_*
 ScreenShot_*
+__pycache__/
+*.py[cod]
+.venv/
+.env
+data/*.db
+data/*.sqlite*
+evaluation/labels.csv
+.DS_Store
+Thumbs.db
