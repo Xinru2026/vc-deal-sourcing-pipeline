@@ -1,7 +1,8 @@
 from pathlib import Path
 import os
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.3-codex")
 
 DB_PATH = Path(os.environ.get("DEAL_DB_PATH", "data/deals.db"))
 SITE_OUTPUT_DIR = Path(os.environ.get("SITE_OUTPUT_DIR", "docs"))
