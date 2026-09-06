@@ -9,7 +9,7 @@ RSS sources
   ↓
 Python ingestion + keyword pre-filter + deduplication
   ↓
-Claude API: factual extraction + exact evidence quotes
+OpenAI GPT-5.3-Codex API: factual extraction + exact evidence quotes
   ↓
 Python validation: schema checks + evidence grounding
   ↓
@@ -22,15 +22,13 @@ SQL analysis + HTML dashboard
 Human review + evaluation
 ```
 
-The key design principle is to separate probabilistic AI output from deterministic business logic: the LLM extracts facts and evidence, while Python validates and scores them.
+The key design principle is to separate probabilistic AI output from deterministic business logic: the model extracts facts and evidence, while Python validates and scores them.
 
 ## Why Python + SQL?
 
-Python is the orchestration layer: it fetches RSS feeds, calls the Claude API, validates output, applies rules, and generates the dashboard.
+Python is the orchestration layer: it fetches RSS feeds, calls the OpenAI API, validates output, applies rules, and generates the dashboard.
 
 SQLite is the structured data store. SQL is the language used to query and analyse the stored results.
-
-In short:
 
 > **Python runs the workflow. SQLite stores the results. SQL asks questions of the stored results.**
 
@@ -45,7 +43,7 @@ This README explains the business problem, architecture, data model, design choi
 Each run is stored in relational tables:
 
 - `runs` — one row per pipeline execution
-- `articles` — articles sent to the LLM after the cheap pre-filter
+- `articles` — articles sent to the model after the cheap pre-filter
 - `companies` — validated company-level output
 - `signals` — one row per company/signal, including evidence
 - `filtered_articles` — screening decisions and reasons
@@ -63,7 +61,7 @@ More examples are in [`sql/examples.sql`](sql/examples.sql).
 
 ### 3. Data-quality validation
 
-The pipeline now validates:
+The pipeline validates:
 
 - allowed categories;
 - allowed funding stages;
@@ -75,12 +73,10 @@ If evidence cannot be grounded in the source text, Python rejects that signal be
 
 ### 4. LLM extraction separated from scoring
 
-The LLM no longer returns `net_score` or `tier`.
-
-Instead:
+The model no longer returns `net_score` or `tier`.
 
 ```text
-Claude → facts + evidence
+GPT-5.3-Codex → facts + exact evidence
 Python → validation
 Python → score = positive signals - negative signals
 Python → tier assignment
@@ -92,6 +88,8 @@ Current tiers:
 - `watch`: Pre-Seed / Seed / Series A with net score 1–2
 - `pending`: Pre-Seed / Seed / Series A with net score <= 0
 - `series_b`: Series B
+
+The OpenAI call also uses Structured Outputs with a JSON schema so the extraction format is machine-checkable before the existing validation layer runs.
 
 ### 5. Evaluation framework
 
@@ -114,14 +112,12 @@ python evaluation/evaluate.py
 
 The script reports precision, recall, F1, accuracy, TP, FP, TN, and FN.
 
-This means the project can distinguish between “we filtered 90% of articles” and “the filter is actually accurate.”
-
 ## Additional workflow improvements
 
-Two small improvements were added because they support the same product goal:
-
-- **Deduplication:** canonical URL/title checks reduce duplicate articles before the LLM call.
+- **Deduplication:** canonical URL/title checks reduce duplicate articles before the model call.
 - **Run tracking:** each execution receives a `run_id`, making historical performance queryable.
+- **Structured Outputs:** OpenAI is constrained to the expected extraction schema.
+- **Environment-based configuration:** API keys and machine-specific paths are not hard-coded.
 
 ## Original prototype result
 
@@ -161,8 +157,23 @@ On Windows:
 ```bash
 .venv\Scripts\activate
 pip install -r requirements.txt
-set ANTHROPIC_API_KEY=your_key_here
+set OPENAI_API_KEY=your_key_here
+set OPENAI_MODEL=gpt-5.3-codex
 python deal_scout.py
+```
+
+For PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY="your_key_here"
+$env:OPENAI_MODEL="gpt-5.3-codex"
+python deal_scout.py
+```
+
+For a cheap first test, also set:
+
+```text
+MAX_ARTICLES=10
 ```
 
 By default, SQLite data is written to:
@@ -171,13 +182,17 @@ By default, SQLite data is written to:
 data/deals.db
 ```
 
-and the site output is written to:
+and site output is written to:
 
 ```text
 docs/
 ```
 
-Machine-specific local paths are no longer hard-coded. Optional overrides are shown in `.env.example`.
+Optional overrides are shown in `.env.example`.
+
+### API access note
+
+Using the Codex desktop app through a ChatGPT plan and calling the OpenAI API from Python are separate access paths. This pipeline uses the OpenAI API and therefore needs an `OPENAI_API_KEY` with API billing/access. The model is configurable through `OPENAI_MODEL`; the default is `gpt-5.3-codex`.
 
 ## Useful SQL for an interview walkthrough
 
@@ -195,12 +210,12 @@ HAVING COUNT(*) >= 3
 ORDER BY positive_signals DESC;
 ```
 
-This one query demonstrates `JOIN`, `WHERE`, `COUNT`, `GROUP BY`, `HAVING`, and `ORDER BY` on a real product dataset.
+This query demonstrates `JOIN`, `WHERE`, `COUNT`, `GROUP BY`, `HAVING`, and `ORDER BY` on a real product dataset.
 
 ## What this project demonstrates
 
 - translating an investment workflow into data/system requirements;
-- integrating an LLM into a practical business process;
+- integrating an OpenAI model into a practical business process;
 - separating probabilistic extraction from deterministic rules;
 - relational data modelling with SQLite;
 - SQL querying and aggregation;
