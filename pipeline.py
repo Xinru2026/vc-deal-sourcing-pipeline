@@ -4,16 +4,105 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import anthropic
 import feedparser
+from openai import OpenAI
 
 from config import (
-    ANTHROPIC_API_KEY, DB_PATH, FUNDING_KEYWORDS, MAX_ARTICLES,
-    OBSIDIAN_FOLDER, OBSIDIAN_VAULT, RSS_FEEDS, SITE_OUTPUT_DIR,
+    DB_PATH,
+    FUNDING_KEYWORDS,
+    MAX_ARTICLES,
+    OBSIDIAN_FOLDER,
+    OBSIDIAN_VAULT,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    RSS_FEEDS,
+    SITE_OUTPUT_DIR,
 )
 from database import complete_run, connect, fail_run, init_db, start_run, store_analysis, store_articles
 from scoring import apply_scoring
 from validation import validate_and_normalize
+
+
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "companies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "article_index": {"type": "integer", "minimum": 1},
+                    "name": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "enum": ["AI", "DeepTech", "SaaS", "HealthTech", "CleanTech", "Other"],
+                    },
+                    "stage": {
+                        "type": "string",
+                        "enum": ["Pre-Seed", "Seed", "Series A", "Series B"],
+                    },
+                    "hq": {"type": "string"},
+                    "description": {"type": "string"},
+                    "signals_hit": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "enum": [
+                                        "regulatory_driver",
+                                        "structural_demand",
+                                        "process_embedding",
+                                        "data_flywheel",
+                                        "vertical_specificity",
+                                        "named_customers",
+                                        "strategic_investor",
+                                        "geography_fit",
+                                        "vague_target",
+                                        "undifferentiated",
+                                    ],
+                                },
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["name", "evidence"],
+                        },
+                    },
+                    "follow_up": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "article_index",
+                    "name",
+                    "category",
+                    "stage",
+                    "hq",
+                    "description",
+                    "signals_hit",
+                    "follow_up",
+                ],
+            },
+        },
+        "filtered_out": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "article_index": {"type": "integer", "minimum": 1},
+                    "reason": {"type": "string"},
+                },
+                "required": ["article_index", "reason"],
+            },
+        },
+    },
+    "required": ["companies", "filtered_out"],
+}
 
 
 def canonical_url(url):
@@ -59,59 +148,72 @@ def fetch_articles(feeds, max_total):
     return articles
 
 
-def extract_with_claude(articles, api_key):
+def extract_with_openai(articles, api_key, model):
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is missing")
-    client = anthropic.Anthropic(api_key=api_key)
+        raise RuntimeError("OPENAI_API_KEY is missing")
+
+    client = OpenAI(api_key=api_key)
+
     article_text = ""
-    for i, a in enumerate(articles, start=1):
-        article_text += f"\n[{i}] {a['title']}\nSource: {a['source']}\nSummary: {a['summary']}\nURL: {a['link']}\n"
+    for i, article in enumerate(articles, start=1):
+        article_text += (
+            f"\n[{i}] {article['title']}\n"
+            f"Source: {article['source']}\n"
+            f"Summary: {article['summary']}\n"
+            f"URL: {article['link']}\n"
+        )
 
     prompt = f"""You are an information-extraction assistant for an early-stage UK VC.
 
 Your role is narrow: filter articles, extract facts, and return short exact evidence quotes.
 Do NOT calculate a score. Do NOT assign a tier. Do NOT infer facts from general knowledge.
 
-Skip if: HQ is outside the UK; pure market commentary; public/listed company; Series C or later.
-Passing stages: Pre-Seed, Seed, Series A, Series B.
+Skip an article if any of these apply:
+- headquarters are outside the UK;
+- it is pure market commentary with no identifiable company;
+- the company is public/listed;
+- the funding round is Series C or later;
+- the funding stage cannot be identified as Pre-Seed, Seed, Series A, or Series B.
 
-Extract: name, category [AI/DeepTech/SaaS/HealthTech/CleanTech/Other], stage, hq, description.
+For a passing article, extract:
+- company name;
+- category: AI, DeepTech, SaaS, HealthTech, CleanTech, or Other;
+- funding stage: Pre-Seed, Seed, Series A, or Series B;
+- HQ location;
+- one factual sentence describing the business.
 
-Signals: regulatory_driver, structural_demand, process_embedding, data_flywheel,
+Signals:
+regulatory_driver, structural_demand, process_embedding, data_flywheel,
 vertical_specificity, named_customers, strategic_investor, geography_fit,
 vague_target, undifferentiated.
 
-Only include a signal when the supplied title/summary contains direct evidence.
-For every signal include a SHORT EXACT QUOTE from the supplied text.
-
-Return ONLY JSON:
-{{
-  "companies": [{{
-    "article_index": 1,
-    "name": "Company",
-    "category": "AI",
-    "stage": "Seed",
-    "hq": "Edinburgh, Scotland",
-    "description": "One factual sentence.",
-    "signals_hit": [{{"name": "geography_fit", "evidence": "exact quote"}}],
-    "follow_up": ["question requiring information not in the article"]
-  }}],
-  "filtered_out": [{{"article_index": 2, "reason": "HQ outside UK"}}]
-}}
+Only include a signal when the supplied title or summary contains direct evidence.
+For every included signal, copy a SHORT EXACT QUOTE from the supplied title or summary.
+If the information is not explicitly present, do not infer it.
 
 ARTICLES
 {article_text}
 """
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=5000,
-        messages=[{"role": "user", "content": prompt}],
+
+    response = client.responses.create(
+        model=model,
+        reasoning={"effort": "low"},
+        input=prompt,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "vc_deal_sourcing_extraction",
+                "strict": True,
+                "schema": EXTRACTION_SCHEMA,
+            }
+        },
+        store=False,
     )
-    raw = message.content[0].text.strip()
-    raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"^```\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+
+    if not response.output_text:
+        raise RuntimeError("OpenAI returned no structured output")
+
+    return json.loads(response.output_text)
 
 
 def build_stats(data, articles):
@@ -171,7 +273,7 @@ def main():
         if not articles:
             raise RuntimeError("No articles matched the pre-filter")
         article_ids = store_articles(conn, run_id, articles)
-        data = extract_with_claude(articles, ANTHROPIC_API_KEY)
+        data = extract_with_openai(articles, OPENAI_API_KEY, OPENAI_MODEL)
         data = validate_and_normalize(data, articles)
         data = apply_scoring(data)
         data["stats"] = build_stats(data, articles)
